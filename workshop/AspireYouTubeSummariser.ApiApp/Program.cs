@@ -1,18 +1,17 @@
 using Aliencube.YouTubeSubtitlesExtractor;
 using Aliencube.YouTubeSubtitlesExtractor.Abstractions;
 using Aliencube.YouTubeSubtitlesExtractor.Models;
-
 using Azure;
 using Azure.AI.OpenAI;
-
 using Microsoft.AspNetCore.Mvc;
-
 using OpenAI.Chat;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// 서비스 기본 설정 추가
 builder.AddServiceDefaults();
 
+// HTTP 클라이언트 및 OpenAI 클라이언트 설정
 builder.Services.AddHttpClient<IYouTubeVideo, YouTubeVideo>();
 builder.Services.AddScoped<AzureOpenAIClient>(sp =>
 {
@@ -20,14 +19,12 @@ builder.Services.AddScoped<AzureOpenAIClient>(sp =>
     var endpoint = new Uri(config["OpenAI:Endpoint"]);
     var credential = new AzureKeyCredential(config["OpenAI:ApiKey"]);
     var client = new AzureOpenAIClient(endpoint, credential);
-
     return client;
 });
 
 builder.Services.AddScoped<YouTubeSummariserService>();
 
-// Add services to the container.
-// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+// Swagger/OpenAPI 설정
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -35,7 +32,7 @@ var app = builder.Build();
 
 app.MapDefaultEndpoints();
 
-// Configure the HTTP request pipeline.
+// 개발 환경에서 Swagger 사용 설정
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -49,6 +46,7 @@ if (app.Environment.IsDevelopment())
     app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 }
 
+// 날씨 예보 API 설정
 var summaries = new[]
 {
     "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
@@ -69,8 +67,14 @@ app.MapGet("/weatherforecast", () =>
 .WithName("GetWeatherForecast")
 .WithOpenApi();
 
+// YouTube 영상 요약 API 설정
 app.MapPost("/summarise", async ([FromBody] SummaryRequest req, YouTubeSummariserService service) =>
 {
+    if (req == null)
+    {
+        return Results.BadRequest("Request cannot be null");
+    }
+
     var summary = await service.SummariseAsync(req);
     return summary;
 })
@@ -86,33 +90,76 @@ record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 
 record SummaryRequest(string? YouTubeLinkUrl, string VideoLanguageCode, string? SummaryLanguageCode);
 
-internal class YouTubeSummariserService(IYouTubeVideo youtube, AzureOpenAIClient openai, IConfiguration config)
+internal class YouTubeSummariserService
 {
-    private readonly IYouTubeVideo _youtube = youtube ?? throw new ArgumentNullException(nameof(youtube));
-    private readonly AzureOpenAIClient _openai = openai ?? throw new ArgumentNullException(nameof(openai));
-    private readonly IConfiguration _config = config ?? throw new ArgumentNullException(nameof(config));
+    private readonly IYouTubeVideo _youtube;
+    private readonly AzureOpenAIClient _openai;
+    private readonly IConfiguration _config;
+
+    public YouTubeSummariserService(IYouTubeVideo youtube, AzureOpenAIClient openai, IConfiguration config)
+    {
+        _youtube = youtube ?? throw new ArgumentNullException(nameof(youtube));
+        _openai = openai ?? throw new ArgumentNullException(nameof(openai));
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+    }
 
     public async Task<string> SummariseAsync(SummaryRequest req)
     {
-        Subtitle subtitle = await this._youtube.ExtractSubtitleAsync(req.YouTubeLinkUrl, req.VideoLanguageCode).ConfigureAwait(false);
-        string caption = subtitle.Content.Select(p => p.Text).Aggregate((a, b) => $"{a}\n{b}");
+        if (req == null)
+        {
+            throw new ArgumentNullException(nameof(req), "Request cannot be null");
+        }
 
-        var chat = this._openai.GetChatClient(this._config["OpenAI:DeploymentName"]);
+        if (string.IsNullOrWhiteSpace(req.YouTubeLinkUrl))
+        {
+            throw new ArgumentException("YouTubeLinkUrl cannot be null or empty", nameof(req.YouTubeLinkUrl));
+        }
+
+        if (string.IsNullOrWhiteSpace(req.VideoLanguageCode))
+        {
+            throw new ArgumentException("VideoLanguageCode cannot be null or empty", nameof(req.VideoLanguageCode));
+        }
+
+        if (string.IsNullOrWhiteSpace(req.SummaryLanguageCode))
+        {
+            throw new ArgumentException("SummaryLanguageCode cannot be null or empty", nameof(req.SummaryLanguageCode));
+        }
+
+        // 자막 추출
+        Subtitle subtitle = await _youtube.ExtractSubtitleAsync(req.YouTubeLinkUrl, req.VideoLanguageCode).ConfigureAwait(false);
+
+        if (subtitle == null || subtitle.Content == null || !subtitle.Content.Any())
+        {
+            throw new InvalidOperationException("Subtitle content is empty or null.");
+        }
+
+        // 자막 내용 생성
+        string caption = string.Join("\n", subtitle.Content.Select(p => p.Text));
+
+        // OpenAI 클라이언트
+        var chat = _openai.GetChatClient(_config["OpenAI:DeploymentName"]);
+
         var messages = new List<ChatMessage>()
         {
-            new SystemChatMessage(this._config["Prompt:System"]),
+            new SystemChatMessage(_config["Prompt:System"]),
             new SystemChatMessage($"Here's the transcript. Summarise it in 5 bullet point items in the given language code of \"{req.SummaryLanguageCode}\"."),
             new UserChatMessage(caption),
         };
-        ChatCompletionOptions options = new()
+
+        var options = new ChatCompletionOptions
         {
-            MaxTokens = int.TryParse(this._config["Prompt:MaxTokens"], out var maxTokens) ? maxTokens : 3000,
-            Temperature = float.TryParse(this._config["Prompt:Temperature"], out var temperature) ? temperature : 0.7f,
+            MaxTokens = int.TryParse(_config["Prompt:MaxTokens"], out var maxTokens) ? maxTokens : 3000,
+            Temperature = float.TryParse(_config["Prompt:Temperature"], out var temperature) ? temperature : 0.7f,
         };
 
         var response = await chat.CompleteChatAsync(messages, options).ConfigureAwait(false);
-        var summary = response.Value.Content[0].Text;
 
+        if (response == null || response.Value.Content == null || !response.Value.Content.Any())
+        {
+            throw new InvalidOperationException("Chat response is empty or null.");
+        }
+
+        var summary = response.Value.Content[0].Text;
         return summary;
     }
 }
