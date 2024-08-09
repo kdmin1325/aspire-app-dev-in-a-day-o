@@ -68,15 +68,18 @@ app.MapGet("/weatherforecast", () =>
 .WithName("GetWeatherForecast")
 .WithOpenApi();
 
-app.MapPost("/summarise", async ([FromBody] SummaryRequest req, YouTubeSummariserService service) =>
+app.MapPost("/summarise", async (HttpContext httpContext) =>
 {
+    var service = httpContext.RequestServices.GetRequiredService<YouTubeSummariserService>();
+    var req = await httpContext.Request.ReadFromJsonAsync<SummaryRequest>();
+
     if (req == null)
     {
         return Results.BadRequest("Request cannot be null");
     }
 
     var summary = await service.SummariseAsync(req);
-    return summary;
+    return Results.Ok(summary);
 })
 .WithName("GetSummary")
 .WithOpenApi();
