@@ -128,7 +128,15 @@ internal class YouTubeSummariserService
             throw new ArgumentException("SummaryLanguageCode cannot be null or empty", nameof(req.SummaryLanguageCode));
         }
 
-        Subtitle subtitle = await _youtube.ExtractSubtitleAsync(req.YouTubeLinkUrl, req.VideoLanguageCode).ConfigureAwait(false);
+        Subtitle subtitle;
+        try
+        {
+            subtitle = await _youtube.ExtractSubtitleAsync(req.YouTubeLinkUrl, req.VideoLanguageCode).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException("Failed to extract subtitles.", ex);
+        }
 
         if (subtitle == null || subtitle.Content == null || !subtitle.Content.Any())
         {
