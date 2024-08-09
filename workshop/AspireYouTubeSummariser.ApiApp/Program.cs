@@ -3,8 +3,16 @@ using Aliencube.YouTubeSubtitlesExtractor.Abstractions;
 using Aliencube.YouTubeSubtitlesExtractor.Models;
 using Azure;
 using Azure.AI.OpenAI;
-using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using OpenAI.Chat;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -16,8 +24,8 @@ builder.Services.AddHttpClient<IYouTubeVideo, YouTubeVideo>();
 builder.Services.AddScoped<AzureOpenAIClient>(sp =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
-    var endpoint = new Uri(config["OpenAI:Endpoint"]);
-    var credential = new AzureKeyCredential(config["OpenAI:ApiKey"]);
+    var endpoint = new Uri(config["OpenAI:Endpoint"] ?? throw new ArgumentNullException("OpenAI:Endpoint"));
+    var credential = new AzureKeyCredential(config["OpenAI:ApiKey"] ?? throw new ArgumentNullException("OpenAI:ApiKey"));
     var client = new AzureOpenAIClient(endpoint, credential);
     return client;
 });
@@ -30,23 +38,16 @@ builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-app.MapDefaultEndpoints();
+app.UseHttpsRedirection();
 
-// 개발 환경에서 Swagger 사용 설정
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapGet("/", () => Results.Redirect("/swagger")).ExcludeFromDescription();
-}
-
-// 날씨 예보 API 설정
 var summaries = new[]
 {
     "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
@@ -67,7 +68,6 @@ app.MapGet("/weatherforecast", () =>
 .WithName("GetWeatherForecast")
 .WithOpenApi();
 
-// YouTube 영상 요약 API 설정
 app.MapPost("/summarise", async ([FromBody] SummaryRequest req, YouTubeSummariserService service) =>
 {
     if (req == null)
@@ -125,7 +125,6 @@ internal class YouTubeSummariserService
             throw new ArgumentException("SummaryLanguageCode cannot be null or empty", nameof(req.SummaryLanguageCode));
         }
 
-        // 자막 추출
         Subtitle subtitle = await _youtube.ExtractSubtitleAsync(req.YouTubeLinkUrl, req.VideoLanguageCode).ConfigureAwait(false);
 
         if (subtitle == null || subtitle.Content == null || !subtitle.Content.Any())
@@ -133,10 +132,8 @@ internal class YouTubeSummariserService
             throw new InvalidOperationException("Subtitle content is empty or null.");
         }
 
-        // 자막 내용 생성
         string caption = string.Join("\n", subtitle.Content.Select(p => p.Text));
 
-        // OpenAI 클라이언트
         var chat = _openai.GetChatClient(_config["OpenAI:DeploymentName"]);
 
         var messages = new List<ChatMessage>()
